@@ -1,9 +1,11 @@
 from bs4 import BeautifulSoup
 from colorama import Back
-from fastapi import APIRouter, HTTPException, BackgroundTasks
-from fastapi import File, UploadFile
+from fastapi import APIRouter, HTTPException, BackgroundTasks, File, UploadFile
 from fastapi.responses import FileResponse
 import sqlite3
+import os
+from pydantic import BaseModel
+from pathlib import Path
 
 from src.api_.clients.scihub import SciHubApi
 from src.consts import DOWNLOAD_FOLDER, DB_PATH
@@ -177,21 +179,46 @@ def get_all_ingested():
     return {"data": data}
 
 @router.delete("/delete_ingested/{filename}")
-def delete_ingested(filename: str):
-    file_id = get_file_id(filename)
-    pgpt_client.ingestion.delete_ingested(file_id)
-    
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM file_gpt_map WHERE filename = ?", (filename,))
-    conn.commit()
-    conn.close()
-    
-    file_path = DOWNLOAD_FOLDER / filename
-    if file_path.exists():
-        file_path.unlink()
-    
-    return {"message": "Ingested file deleted successfully"}
+async def delete_ingested(filename: str):
+    try:
+        # First, get the doc_id from the database
+        doc_id = get_mapping(filename)
+        if not doc_id:
+            raise HTTPException(status_code=404, detail="File not found in database")
+
+        # Delete from PrivateGPT
+        try:
+            pgpt_client.ingestion.delete_ingested(doc_id)
+        except Exception as e:
+            print(f"Error deleting from PrivateGPT: {e}")
+            # Continue with other deletions even if PrivateGPT deletion fails
+
+        # Delete from database
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        try:
+            # Delete from file_gpt_map
+            cursor.execute("DELETE FROM file_gpt_map WHERE filename = ?", (filename,))
+            # Delete associated conversations
+            cursor.execute(
+                """
+                DELETE FROM conversation_history 
+                WHERE file_id IN (SELECT id FROM file_gpt_map WHERE filename = ?)
+                """, 
+                (filename,)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Delete the actual file
+        file_path = DOWNLOAD_FOLDER / filename
+        if file_path.exists():
+            os.remove(file_path)  # Using os.remove instead of Path.unlink() for better error handling
+
+        return {"message": "File deleted successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/delete_all_ingested")
 def delete_all_ingested():
@@ -327,3 +354,85 @@ async def get_file_id(filename: str):
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         conn.close()
+
+
+class RenameRequest(BaseModel):
+    new_filename: str
+
+@router.put("/rename-file/{filename}")
+async def rename_file(filename: str, request: RenameRequest):
+    try:
+        # Ensure new filename has .pdf extension
+        if not request.new_filename.lower().endswith('.pdf'):
+            request.new_filename += '.pdf'
+
+        # Get the file paths
+        old_file_path = DOWNLOAD_FOLDER / filename
+        new_file_path = DOWNLOAD_FOLDER / request.new_filename
+
+        # Check if source file exists
+        if not old_file_path.exists():
+            raise HTTPException(status_code=404, detail="Source file not found")
+
+        # Check if destination filename already exists
+        if new_file_path.exists():
+            raise HTTPException(status_code=400, detail="A file with this name already exists")
+
+        # Get the doc_id before updating the database
+        doc_id = get_mapping(filename)
+        if not doc_id:
+            raise HTTPException(status_code=404, detail="File not found in database")
+
+        # Update the database
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        try:
+            # Update file_gpt_map table
+            cursor.execute(
+                "UPDATE file_gpt_map SET filename = ? WHERE filename = ?",
+                (request.new_filename, filename)
+            )
+            
+            # Update conversation_history table references if needed
+            cursor.execute(
+                """
+                UPDATE conversation_history 
+                SET file_id = (SELECT id FROM file_gpt_map WHERE filename = ?)
+                WHERE file_id = (SELECT id FROM file_gpt_map WHERE filename = ?)
+                """,
+                (request.new_filename, filename)
+            )
+            
+            conn.commit()
+        except sqlite3.Error as e:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        finally:
+            conn.close()
+
+        # Rename the actual file
+        try:
+            os.rename(old_file_path, new_file_path)
+        except OSError as e:
+            # If file rename fails, revert database changes
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    "UPDATE file_gpt_map SET filename = ? WHERE filename = ?",
+                    (filename, request.new_filename)
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            raise HTTPException(status_code=500, detail=f"Failed to rename file: {str(e)}")
+
+        return {
+            "message": "File renamed successfully",
+            "old_name": filename,
+            "new_name": request.new_filename
+        }
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=str(e))

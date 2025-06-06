@@ -1,6 +1,15 @@
 <template>
   <div class="pdf-viewer">
-    <vue-pdf-app style="height: 100vh;" :pdf="pdfUrl" @error="handleError"></vue-pdf-app>
+    <div class="pdf-header">
+      <h2>{{ filename }}</h2>
+      <FileSettingsMenu 
+        :filename="filename"
+        @file-deleted="handleFileDeleted"
+        @file-renamed="handleFileRenamed"
+      />
+    </div>
+
+    <vue-pdf-app style="height: calc(100vh - 60px);" :pdf="pdfUrl" @error="handleError"></vue-pdf-app>
 
     <transition name="fade">
       <div v-if="error" class="error">{{ error }}</div>
@@ -53,11 +62,14 @@
 import { ref, computed, onMounted } from "vue";
 import VuePdfApp from "vue3-pdf-app";
 import { marked } from "marked";
+import FileSettingsMenu from '../components/FileSettingsMenu.vue';
+import { useRouter } from 'vue-router';
 
 export default {
   name: "PdfView",
   components: {
-    VuePdfApp
+    VuePdfApp,
+    FileSettingsMenu
   },
   props: {
     filePath: {
@@ -73,6 +85,8 @@ export default {
     const loading = ref(false);
     const chatLoading = ref(false);
     const buttonPressed = ref(false);
+    const filename = computed(() => props.filePath.split("/").pop());
+    const router = useRouter();
 
     const pdfUrl = computed(() => `http://127.0.0.1:8000/file/${encodeURIComponent(props.filePath)}`);
     const renderedSummary = computed(() => marked(summary.value || ""));
@@ -166,6 +180,21 @@ export default {
       }
     };
 
+    const handleFileDeleted = () => {
+      // Navigate back to files list
+      router.push('/files');
+    };
+
+    const handleFileRenamed = (newFilename) => {
+      // Redirect to the new file path
+      const oldPath = props.filePath;
+      const newPath = oldPath.substring(0, oldPath.lastIndexOf('/') + 1) + newFilename;
+      router.push({
+        name: 'PdfExplorerView',
+        params: { filePath: newPath }
+      });
+    };
+
     onMounted(loadChatHistory);
 
     return {
@@ -181,7 +210,10 @@ export default {
       sendMessage,
       chatHistory,
       chatLoading,
-      renderMarkdown
+      renderMarkdown,
+      filename,
+      handleFileDeleted,
+      handleFileRenamed
     };
   },
 };
@@ -351,6 +383,22 @@ export default {
   color: #666;
   text-align: right;
   margin-top: 5px;
+}
+
+.pdf-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 20px;
+  background: #2e2e38;
+  position: relative;
+  z-index: 10;
+}
+
+.pdf-header h2 {
+  margin: 0;
+  color: #e6e6e6;
+  font-size: 1.2rem;
 }
 
 </style>
