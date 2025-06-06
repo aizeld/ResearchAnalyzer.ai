@@ -25,7 +25,10 @@
             <strong>Q:</strong> {{ entry.question }}
           </div>
           <div class="chat-response-rendered" v-html="renderMarkdown(entry.answer)"></div>
-          <p class="source-rendered">Source: {{ entry.source }}</p>
+          <div v-if="entry.source" class="source-rendered">Source: {{ entry.source }}</div>
+          <div v-if="entry.timestamp" class="timestamp-rendered">
+            {{ new Date(entry.timestamp).toLocaleString() }}
+          </div>
         </div>
       </div>
 
@@ -45,15 +48,16 @@
     </div>
   </div>
 </template>
+
 <script>
-import { ref, computed } from "vue";
+import { ref, computed, onMounted } from "vue";
 import VuePdfApp from "vue3-pdf-app";
 import { marked } from "marked";
 
 export default {
   name: "PdfView",
   components: {
-    VuePdfApp,
+    VuePdfApp
   },
   props: {
     filePath: {
@@ -65,20 +69,30 @@ export default {
     const error = ref(null);
     const summary = ref(null);
     const userMessage = ref("");
-    const chatHistory = ref([]); // Maintain a list of all questions and answers
+    const chatHistory = ref([]);
     const loading = ref(false);
     const chatLoading = ref(false);
     const buttonPressed = ref(false);
 
     const pdfUrl = computed(() => `http://127.0.0.1:8000/file/${encodeURIComponent(props.filePath)}`);
-
     const renderedSummary = computed(() => marked(summary.value || ""));
-
     const renderMarkdown = (text) => marked(text || "");
 
     const handleError = (err) => {
       console.error("PDF loading error:", err);
       error.value = "Failed to load PDF. Please try again.";
+    };
+
+    const loadChatHistory = async () => {
+      try {
+        const filename = props.filePath.split("/").pop();
+        const response = await fetch(`http://127.0.0.1:8000/chat-history/${encodeURIComponent(filename)}`);
+        if (!response.ok) throw new Error("Failed to load chat history");
+        const history = await response.json();
+        chatHistory.value = history;
+      } catch (err) {
+        console.error("Failed to load chat history:", err);
+      }
     };
 
     const summarizePdf = async () => {
@@ -142,7 +156,7 @@ export default {
         chatHistory.value.push({
           question: userMessage.value,
           answer: chatResult.response,
-          source: chatResult.source,
+          source: chatResult.source
         });
       } catch (err) {
         error.value = "Failed to send message. Please try again.";
@@ -151,6 +165,8 @@ export default {
         userMessage.value = "";
       }
     };
+
+    onMounted(loadChatHistory);
 
     return {
       error,
@@ -165,14 +181,11 @@ export default {
       sendMessage,
       chatHistory,
       chatLoading,
-      renderMarkdown, // Add Markdown rendering function
+      renderMarkdown
     };
   },
 };
 </script>
-
-
-
 
 <style scoped>
 /* Keep your existing styles */
@@ -331,6 +344,13 @@ export default {
   color: #ffcc99;
   padding: 2px 4px;
   border-radius: 4px;
+}
+
+.timestamp-rendered {
+  font-size: 0.8rem;
+  color: #666;
+  text-align: right;
+  margin-top: 5px;
 }
 
 </style>

@@ -14,6 +14,7 @@ import sqlite3
 
 from src.consts import DB_PATH, DOWNLOAD_FOLDER
 from src.api_.routers.main import router
+from src.api_.routers.conversation import router as conversation_router
 from src.dependencies import pgpt_client
 
 
@@ -26,6 +27,18 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             filename TEXT UNIQUE NOT NULL,
             doc_id TEXT NOT NULL
+        )
+    """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS conversation_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_id INTEGER NOT NULL,
+            question TEXT NOT NULL,
+            answer TEXT NOT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (file_id) REFERENCES file_gpt_map(id)
         )
     """
     )
@@ -45,3 +58,4 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(router=router)
+app.include_router(router=conversation_router)

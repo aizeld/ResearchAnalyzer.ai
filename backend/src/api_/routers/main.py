@@ -3,9 +3,10 @@ from colorama import Back
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from fastapi import File, UploadFile
 from fastapi.responses import FileResponse
+import sqlite3
 
 from src.api_.clients.scihub import SciHubApi
-from src.consts import DOWNLOAD_FOLDER
+from src.consts import DOWNLOAD_FOLDER, DB_PATH
 from src.dependencies import pgpt_client, summary_store
 from src.services.summarization import (
     background_summarize,
@@ -175,6 +176,43 @@ def get_all_ingested():
     data = pgpt_client.ingestion.list_ingested().data
     return {"data": data}
 
+@router.delete("/delete_ingested/{filename}")
+def delete_ingested(filename: str):
+    file_id = get_file_id(filename)
+    pgpt_client.ingestion.delete_ingested(file_id)
+    
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM file_gpt_map WHERE filename = ?", (filename,))
+    conn.commit()
+    conn.close()
+    
+    file_path = DOWNLOAD_FOLDER / filename
+    if file_path.exists():
+        file_path.unlink()
+    
+    return {"message": "Ingested file deleted successfully"}
+
+@router.delete("/delete_all_ingested")
+def delete_all_ingested():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM file_gpt_map")
+    conn.commit()
+    conn.close()
+    
+    for file in DOWNLOAD_FOLDER.iterdir():
+        if file.is_file() and file.suffix == ".pdf":
+            file.unlink()
+
+    list_ids = get_all_ingested()
+    list_ids = list_ids["data"]
+    for doc in list_ids:
+        pgpt_client.ingestion.delete_ingested(doc.doc_id)
+        
+    return {"message": "All ingested files deleted successfully"}
+
+
 
 @router.post("/chat-with-doc")
 async def chat_with_doc(request: ChatRequest):
@@ -183,24 +221,109 @@ async def chat_with_doc(request: ChatRequest):
     prompt = request.prompt
     print(filename)
 
-    doc_id = get_mapping(
-        filename
-    )  # Retrieve `doc_id` for the filename from the database
+    doc_id = get_mapping(filename)
     if not doc_id:
         raise HTTPException(
             status_code=404, detail="Document ID not found for the given file"
         )
-    print(doc_id)
+    
+    list_ids = get_all_ingested()
+    list_ids = list_ids["data"]
+    
+    found = False
+    for doc in list_ids:
+        if doc.doc_id == doc_id:
+            print(f"found {doc_id}")
+            found = True
+            break
+        
+    if found == False:
+        return
+    
     try:
         result = pgpt_client.contextual_completions.prompt_completion(
             prompt=prompt,
             use_context=True,
             context_filter={"docs_ids": [doc_id]},
             include_sources=True,
-        ).choices[0]
+        )
+        print(result)
+        result = result.choices[0]
+        
+        # Store conversation in the database
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        try:
+            # Get file_id from filename
+            cursor.execute("SELECT id FROM file_gpt_map WHERE filename = ?", (filename,))
+            file_id_result = cursor.fetchone()
+            if file_id_result:
+                file_id = file_id_result[0]
+                cursor.execute(
+                    """
+                    INSERT INTO conversation_history (file_id, question, answer)
+                    VALUES (?, ?, ?)
+                    """,
+                    (file_id, prompt, result.message.content)
+                )
+                conn.commit()
+        finally:
+            conn.close()
+        
         return {
             "response": result.message.content,
             "source": result.sources[0].document.doc_metadata["file_name"],
         }
     except Exception as e:
+        print(e)
         raise HTTPException(status_code=500, detail=f"Error during chat: {str(e)}")
+
+
+@router.get("/chat-history/{filename}")
+async def get_chat_history(filename: str):
+    """Get chat history for a specific file"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT ch.question, ch.answer, ch.timestamp
+            FROM conversation_history ch
+            JOIN file_gpt_map fm ON ch.file_id = fm.id
+            WHERE fm.filename = ?
+            ORDER BY ch.timestamp ASC
+            """,
+            (filename,)
+        )
+        rows = cursor.fetchall()
+        return [
+            {
+                "question": row[0],
+                "answer": row[1],
+                "timestamp": row[2]
+            }
+            for row in rows
+        ]
+    except sqlite3.Error as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+
+@router.get("/file-id/{filename}")
+async def get_file_id(filename: str):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT id FROM file_gpt_map WHERE filename = ?",
+            (filename,)
+        )
+        result = cursor.fetchone()
+        if not result:
+            raise HTTPException(status_code=404, detail="File not found")
+        return {"id": result[0]}
+    except sqlite3.Error as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
